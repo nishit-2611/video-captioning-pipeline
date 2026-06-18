@@ -193,6 +193,21 @@ def save_run_artifact(
 ProgressCallback = Callable[[int, int, PipelineResult], None]
 
 
+def _append_result_to_csv(csv_path: Path, result: PipelineResult, write_header: bool) -> None:
+    """Append a single result row to the incremental CSV file."""
+    row = {
+        "row_index": result.row_index,
+        "row_id": result.row_id,
+        "drive_link": result.drive_link,
+        "status": result.status,
+        "caption": result.caption,
+        "error": result.error,
+    }
+    row.update(result.metadata)
+    df = pd.DataFrame([row])
+    df.to_csv(csv_path, mode="a", header=write_header, index=False)
+
+
 def run_captioning_pipeline(
     api_key: str,
     jobs: list[PipelineJob],
@@ -201,6 +216,7 @@ def run_captioning_pipeline(
     hyperparameters: GeminiHyperparameters,
     progress_callback: Optional[ProgressCallback] = None,
     cleanup_uploads: bool = True,
+    incremental_csv_path: Optional[Path] = None,
 ) -> list[PipelineResult]:
     client = create_client(api_key)
     download_dir = create_temp_download_dir()
@@ -246,6 +262,12 @@ def run_captioning_pipeline(
                     delete_uploaded_file(client, uploaded_file)
 
             results.append(result)
+
+            if incremental_csv_path:
+                _append_result_to_csv(
+                    incremental_csv_path, result, write_header=(index == 1)
+                )
+
             if progress_callback:
                 progress_callback(index, len(jobs), result)
     finally:

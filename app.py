@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from src.gemini_client import (
@@ -262,6 +265,24 @@ def render_csv_section() -> None:
         st.error(str(exc))
 
 
+def _auto_download_csv(csv_string: str, filename: str) -> None:
+    """Inject a small JS snippet that triggers a browser download automatically."""
+    b64 = base64.b64encode(csv_string.encode()).decode()
+    js = f"""
+    <script>
+    (function() {{
+        var link = document.createElement('a');
+        link.href = 'data:text/csv;base64,{b64}';
+        link.download = '{filename}';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }})();
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
 def render_run_section(
     hyperparameters: GeminiHyperparameters,
     system_prompt: str,
@@ -286,15 +307,40 @@ def render_run_section(
     st.write(f"Ready to process **{job_count}** videos with `{hyperparameters.model}`.")
 
     if st.button("Generate Captions", type="primary", use_container_width=True):
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        incremental_csv = OUTPUT_DIR / f"captions_live_{timestamp}.csv"
+
         progress_bar = st.progress(0.0)
         status_box = st.empty()
-        results: list[PipelineResult] = []
+        live_table_placeholder = st.empty()
+        live_captions_container = st.container()
+        caption_placeholders: dict[str, object] = {}
+
+        collected_results: list[PipelineResult] = []
 
         def on_progress(current: int, total: int, result: PipelineResult) -> None:
+            collected_results.append(result)
+
             progress_bar.progress(current / total)
             status_box.write(
-                f"Processed {current}/{total}: `{result.row_id}` → **{result.status}**"
+                f"Processing {current}/{total}: `{result.row_id}` — **{result.status}**"
             )
+
+            live_table_placeholder.dataframe(
+                results_to_dataframe(collected_results),
+                use_container_width=True,
+            )
+
+            with live_captions_container:
+                if result.row_id not in caption_placeholders:
+                    caption_placeholders[result.row_id] = st.empty()
+
+                ph = caption_placeholders[result.row_id]
+                if result.status == "success":
+                    ph.success(f"**{result.row_id}**\n\n{result.caption}")
+                else:
+                    ph.error(f"**{result.row_id}** — {result.error}")
 
         with st.spinner("Running captioning pipeline..."):
             results = run_captioning_pipeline(
@@ -304,6 +350,7 @@ def render_run_section(
                 user_prompt=user_prompt or DEFAULT_USER_PROMPT,
                 hyperparameters=hyperparameters,
                 progress_callback=on_progress,
+                incremental_csv_path=incremental_csv,
             )
 
         st.session_state.results = results
@@ -316,9 +363,13 @@ def render_run_section(
         )
         st.session_state.last_run_dir = str(run_dir)
 
-        success_count = sum(1 for item in results if item.status == "success")
+        success_count = sum(1 for r in results if r.status == "success")
         st.success(f"Finished: {success_count}/{len(results)} captions generated successfully.")
-        st.info(f"Saved run artifacts to `{run_dir}`.")
+
+        final_csv = results_to_csv(results)
+        st.session_state["final_csv"] = final_csv
+        _auto_download_csv(final_csv, "captions.csv")
+        st.toast("CSV downloaded automatically!", icon="\u2705")
 
 
 def render_results_section() -> None:
@@ -331,7 +382,7 @@ def render_results_section() -> None:
     results_df = results_to_dataframe(st.session_state.results)
     st.dataframe(results_df, use_container_width=True)
 
-    csv_data = results_to_csv(st.session_state.results)
+    csv_data = st.session_state.get("final_csv") or results_to_csv(st.session_state.results)
     st.download_button(
         "Download captions CSV",
         data=csv_data,
@@ -342,11 +393,10 @@ def render_results_section() -> None:
 
     with st.expander("Inspect individual captions"):
         for result in st.session_state.results:
-            st.markdown(f"**{result.row_id}** — `{result.status}`")
             if result.status == "success":
-                st.write(result.caption)
+                st.success(f"**{result.row_id}**\n\n{result.caption}")
             else:
-                st.error(result.error)
+                st.error(f"**{result.row_id}** — {result.error}")
             st.divider()
 
 
