@@ -64,7 +64,6 @@ def get_api_key() -> str:
 def init_session_state() -> None:
     defaults = {
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
-        "user_prompt": DEFAULT_USER_PROMPT,
         "csv_bytes": None,
         "csv_filename": "",
         "csv_info": None,
@@ -176,23 +175,16 @@ def render_sidebar() -> GeminiHyperparameters:
     )
 
 
-def render_prompt_section() -> tuple[str, str]:
-    st.subheader("Prompts")
+def render_prompt_section() -> str:
+    st.subheader("System Prompt")
     system_prompt = st.text_area(
         "System prompt",
         value=st.session_state.system_prompt,
         height=220,
         help="Instructions that define caption style, format, and constraints.",
     )
-    user_prompt = st.text_area(
-        "User prompt",
-        value=st.session_state.user_prompt,
-        height=120,
-        help="Task instruction sent with each video.",
-    )
     st.session_state.system_prompt = system_prompt
-    st.session_state.user_prompt = user_prompt
-    return system_prompt.strip(), user_prompt.strip()
+    return system_prompt.strip()
 
 
 def render_csv_section() -> None:
@@ -286,7 +278,6 @@ def _auto_download_csv(csv_string: str, filename: str) -> None:
 def render_run_section(
     hyperparameters: GeminiHyperparameters,
     system_prompt: str,
-    user_prompt: str,
 ) -> None:
     st.subheader("Run Captioning Pipeline")
 
@@ -347,7 +338,7 @@ def render_run_section(
                 api_key=api_key,
                 jobs=st.session_state.jobs,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt or DEFAULT_USER_PROMPT,
+                user_prompt=DEFAULT_USER_PROMPT,
                 hyperparameters=hyperparameters,
                 progress_callback=on_progress,
                 incremental_csv_path=incremental_csv,
@@ -357,7 +348,7 @@ def render_run_section(
         run_dir = save_run_artifact(
             OUTPUT_DIR,
             system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            user_prompt=DEFAULT_USER_PROMPT,
             hyperparameters=hyperparameters,
             results=results,
         )
@@ -413,9 +404,9 @@ def main() -> None:
     st.title("Video Captioning Pipeline")
     st.caption("Batch caption videos from Google Drive links using Gemini 3.1 Pro Preview.")
 
-    system_prompt, user_prompt = render_prompt_section()
+    system_prompt = render_prompt_section()
     render_csv_section()
-    render_run_section(hyperparameters, system_prompt, user_prompt)
+    render_run_section(hyperparameters, system_prompt)
     render_results_section()
 
 
