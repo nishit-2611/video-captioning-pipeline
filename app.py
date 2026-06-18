@@ -110,17 +110,34 @@ def render_sidebar() -> GeminiHyperparameters:
         index=MODEL_VARIANTS.index(DEFAULT_MODEL),
         help="Use the customtools variant for agentic workflows with custom tools.",
     )
-    thinking_level = st.sidebar.selectbox(
-        "Thinking level",
-        THINKING_LEVELS,
-        index=THINKING_LEVELS.index("high"),
-        help="Controls reasoning depth. `high` is the Gemini 3 default.",
+
+    use_defaults = st.sidebar.toggle(
+        "Use model default settings",
+        value=True,
+        help="When enabled, all hyperparameters are left at the model's built-in defaults. "
+             "Disable to customise individual values.",
     )
+
     media_resolution = st.sidebar.selectbox(
         "Media resolution",
         MEDIA_RESOLUTIONS,
         index=MEDIA_RESOLUTIONS.index("media_resolution_low"),
         help="Use `high` for text-heavy videos; `low`/`medium` are usually enough for captioning.",
+    )
+
+    if use_defaults:
+        st.sidebar.caption("All other parameters will use the model's built-in defaults.")
+        return GeminiHyperparameters(
+            model=model,
+            use_defaults=True,
+            media_resolution=media_resolution,
+        )
+
+    thinking_level = st.sidebar.selectbox(
+        "Thinking level",
+        THINKING_LEVELS,
+        index=THINKING_LEVELS.index("high"),
+        help="Controls reasoning depth. `high` is the Gemini 3 default.",
     )
     temperature = st.sidebar.slider(
         "Temperature",
@@ -172,6 +189,7 @@ def render_sidebar() -> GeminiHyperparameters:
 
     return GeminiHyperparameters(
         model=model,
+        use_defaults=False,
         temperature=float(temperature),
         top_p=float(top_p),
         top_k=int(top_k),

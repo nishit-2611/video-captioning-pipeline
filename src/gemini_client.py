@@ -31,12 +31,13 @@ MEDIA_RESOLUTIONS = [
 @dataclass
 class GeminiHyperparameters:
     model: str = DEFAULT_MODEL
-    temperature: float = 1.0
-    top_p: float = 0.95
-    top_k: int = 40
-    max_output_tokens: int = 65536
+    use_defaults: bool = True
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     thinking_budget: Optional[int] = None
-    thinking_level: str = "high"
+    thinking_level: Optional[str] = None
     include_thoughts: bool = False
     media_resolution: str = "media_resolution_low"
     stop_sequences: list[str] = field(default_factory=list)
@@ -45,6 +46,7 @@ class GeminiHyperparameters:
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
+            "use_defaults": self.use_defaults,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
@@ -113,30 +115,36 @@ def build_generation_config(
     hyperparameters: GeminiHyperparameters,
     system_prompt: str = "",
 ) -> types.GenerateContentConfig:
-    thinking_kwargs: dict[str, Any] = {
-        "thinking_level": hyperparameters.thinking_level,
-        "include_thoughts": hyperparameters.include_thoughts,
-    }
-    if hyperparameters.thinking_budget is not None:
-        thinking_kwargs["thinking_budget"] = hyperparameters.thinking_budget
-
     config_kwargs: dict[str, Any] = {
-        "temperature": hyperparameters.temperature,
-        "top_p": hyperparameters.top_p,
-        "top_k": hyperparameters.top_k,
-        "max_output_tokens": hyperparameters.max_output_tokens,
-        "thinking_config": types.ThinkingConfig(**thinking_kwargs),
         "media_resolution": hyperparameters.media_resolution,
     }
 
+    if not hyperparameters.use_defaults:
+        if hyperparameters.temperature is not None:
+            config_kwargs["temperature"] = hyperparameters.temperature
+        if hyperparameters.top_p is not None:
+            config_kwargs["top_p"] = hyperparameters.top_p
+        if hyperparameters.top_k is not None:
+            config_kwargs["top_k"] = hyperparameters.top_k
+        if hyperparameters.max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = hyperparameters.max_output_tokens
+
+        thinking_kwargs: dict[str, Any] = {
+            "include_thoughts": hyperparameters.include_thoughts,
+        }
+        if hyperparameters.thinking_level is not None:
+            thinking_kwargs["thinking_level"] = hyperparameters.thinking_level
+        if hyperparameters.thinking_budget is not None:
+            thinking_kwargs["thinking_budget"] = hyperparameters.thinking_budget
+        config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_kwargs)
+
+        if hyperparameters.stop_sequences:
+            config_kwargs["stop_sequences"] = hyperparameters.stop_sequences
+        if hyperparameters.response_mime_type:
+            config_kwargs["response_mime_type"] = hyperparameters.response_mime_type
+
     if system_prompt.strip():
         config_kwargs["system_instruction"] = system_prompt.strip()
-
-    if hyperparameters.stop_sequences:
-        config_kwargs["stop_sequences"] = hyperparameters.stop_sequences
-
-    if hyperparameters.response_mime_type:
-        config_kwargs["response_mime_type"] = hyperparameters.response_mime_type
 
     return types.GenerateContentConfig(**config_kwargs)
 
@@ -179,47 +187,74 @@ def generate_caption(
         ),
     )
 
-    response = client.models.generate_content(
-        model=hyperparameters.model,
-        contents=[
-            types.Content(
-                role="user",
-                parts=[
-                    video_part,
-                    types.Part(text=user_prompt),
-                ],
-            )
-        ],
-        config=build_generation_config(hyperparameters, system_prompt=system_prompt),
-    )
+    try:
+        response = client.models.generate_content(
+            model=hyperparameters.model,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        video_part,
+                        types.Part(text=user_prompt),
+                    ],
+                )
+            ],
+            config=build_generation_config(hyperparameters, system_prompt=system_prompt),
+        )
+    except Exception as api_error:
+        raise RuntimeError(f"Gemini API error: {api_error}") from api_error
 
     finish_reason = None
+    finish_message = None
+    safety_ratings = None
     if response.candidates:
-        finish_reason = response.candidates[0].finish_reason
+        candidate = response.candidates[0]
+        finish_reason = candidate.finish_reason
+        finish_message = candidate.finish_message
+        safety_ratings = candidate.safety_ratings
 
-    if finish_reason and finish_reason.name == "MAX_TOKENS":
-        log.warning(
-            "Response for %s was truncated (MAX_TOKENS). "
-            "Increase max_output_tokens or lower thinking_level.",
-            video_path.name,
-        )
+    prompt_feedback = response.prompt_feedback
+
+    if finish_reason and finish_reason.name not in ("STOP", "MAX_TOKENS"):
+        parts = [f"Gemini refused to generate. finish_reason={finish_reason.name}"]
+        if finish_message:
+            parts.append(f"message={finish_message}")
+        if safety_ratings:
+            ratings_str = ", ".join(
+                f"{r.category.name}={r.probability.name}"
+                for r in safety_ratings
+                if hasattr(r, "category") and hasattr(r, "probability")
+            )
+            if ratings_str:
+                parts.append(f"safety_ratings=[{ratings_str}]")
+        if prompt_feedback:
+            parts.append(f"prompt_feedback={prompt_feedback}")
+        raise RuntimeError(" | ".join(parts))
 
     caption = _extract_text_from_response(response)
+
+    usage = response.usage_metadata
+    usage_str = ""
+    if usage:
+        usage_str = (
+            f" (prompt_tokens={usage.prompt_token_count},"
+            f" output_tokens={usage.candidates_token_count},"
+            f" thoughts_tokens={getattr(usage, 'thoughts_token_count', 'N/A')})"
+        )
 
     if not caption:
         detail = ""
         if finish_reason:
-            detail = f" finish_reason={finish_reason.name}"
-        usage = response.usage_metadata
-        if usage:
-            detail += (
-                f" prompt_tokens={usage.prompt_token_count}"
-                f" output_tokens={usage.candidates_token_count}"
-                f" thoughts_tokens={getattr(usage, 'thoughts_token_count', 'N/A')}"
-            )
+            detail += f" finish_reason={finish_reason.name}"
+        detail += usage_str
         raise RuntimeError(f"Gemini returned an empty response.{detail}")
 
     if finish_reason and finish_reason.name == "MAX_TOKENS":
+        log.warning(
+            "Response for %s was truncated (MAX_TOKENS).%s",
+            video_path.name,
+            usage_str,
+        )
         caption += "\n\n[TRUNCATED — increase max output tokens]"
 
     return caption.strip()
