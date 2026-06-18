@@ -1,0 +1,182 @@
+"""Gemini 3.1 Pro Preview client for video captioning."""
+
+from __future__ import annotations
+
+import mimetypes
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from google import genai
+from google.genai import types
+
+
+DEFAULT_MODEL = "gemini-3.1-pro-preview"
+MODEL_VARIANTS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools",
+]
+
+THINKING_LEVELS = ["low", "medium", "high"]
+MEDIA_RESOLUTIONS = [
+    "media_resolution_low",
+    "media_resolution_medium",
+    "media_resolution_high",
+]
+
+
+@dataclass
+class GeminiHyperparameters:
+    model: str = DEFAULT_MODEL
+    temperature: float = 1.0
+    top_p: float = 0.95
+    top_k: int = 40
+    max_output_tokens: int = 8192
+    thinking_level: str = "high"
+    include_thoughts: bool = False
+    media_resolution: str = "media_resolution_low"
+    stop_sequences: list[str] = field(default_factory=list)
+    response_mime_type: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "max_output_tokens": self.max_output_tokens,
+            "thinking_level": self.thinking_level,
+            "include_thoughts": self.include_thoughts,
+            "media_resolution": self.media_resolution,
+            "stop_sequences": self.stop_sequences,
+            "response_mime_type": self.response_mime_type,
+        }
+
+
+def create_client(api_key: str) -> genai.Client:
+    return genai.Client(api_key=api_key)
+
+
+def _guess_mime_type(path: Path) -> str:
+    mime_type, _ = mimetypes.guess_type(str(path))
+    return mime_type or "video/mp4"
+
+
+def _media_resolution_level(resolution: str) -> types.PartMediaResolutionLevel:
+    mapping = {
+        "media_resolution_low": types.PartMediaResolutionLevel.MEDIA_RESOLUTION_LOW,
+        "media_resolution_medium": types.PartMediaResolutionLevel.MEDIA_RESOLUTION_MEDIUM,
+        "media_resolution_high": types.PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH,
+    }
+    return mapping.get(
+        resolution,
+        types.PartMediaResolutionLevel.MEDIA_RESOLUTION_LOW,
+    )
+
+
+def upload_video(
+    client: genai.Client,
+    video_path: Path,
+    display_name: Optional[str] = None,
+    poll_interval_seconds: int = 5,
+    max_wait_seconds: int = 600,
+) -> types.File:
+    """Upload a local video to the Gemini Files API and wait until ACTIVE."""
+    uploaded = client.files.upload(
+        file=str(video_path),
+        config={"display_name": display_name or video_path.name},
+    )
+
+    elapsed = 0
+    while uploaded.state and uploaded.state.name != "ACTIVE":
+        if uploaded.state.name == "FAILED":
+            raise RuntimeError(f"Video upload failed for {video_path.name}")
+
+        if elapsed >= max_wait_seconds:
+            raise TimeoutError(
+                f"Timed out waiting for video processing: {video_path.name}"
+            )
+
+        time.sleep(poll_interval_seconds)
+        elapsed += poll_interval_seconds
+        uploaded = client.files.get(name=uploaded.name)
+
+    return uploaded
+
+
+def build_generation_config(
+    hyperparameters: GeminiHyperparameters,
+    system_prompt: str = "",
+) -> types.GenerateContentConfig:
+    config_kwargs: dict[str, Any] = {
+        "temperature": hyperparameters.temperature,
+        "top_p": hyperparameters.top_p,
+        "top_k": hyperparameters.top_k,
+        "max_output_tokens": hyperparameters.max_output_tokens,
+        "thinking_config": types.ThinkingConfig(
+            thinking_level=hyperparameters.thinking_level,
+            include_thoughts=hyperparameters.include_thoughts,
+        ),
+        "media_resolution": hyperparameters.media_resolution,
+    }
+
+    if system_prompt.strip():
+        config_kwargs["system_instruction"] = system_prompt.strip()
+
+    if hyperparameters.stop_sequences:
+        config_kwargs["stop_sequences"] = hyperparameters.stop_sequences
+
+    if hyperparameters.response_mime_type:
+        config_kwargs["response_mime_type"] = hyperparameters.response_mime_type
+
+    return types.GenerateContentConfig(**config_kwargs)
+
+
+def generate_caption(
+    client: genai.Client,
+    video_path: Path,
+    system_prompt: str,
+    user_prompt: str,
+    hyperparameters: GeminiHyperparameters,
+    uploaded_file: Optional[types.File] = None,
+) -> str:
+    """Generate a caption for a single video using Gemini 3.1 Pro Preview."""
+    video_file = uploaded_file or upload_video(client, video_path)
+    mime_type = _guess_mime_type(video_path)
+
+    video_part = types.Part(
+        file_data=types.FileData(
+            file_uri=video_file.uri,
+            mime_type=mime_type,
+        ),
+        media_resolution=types.PartMediaResolution(
+            level=_media_resolution_level(hyperparameters.media_resolution),
+        ),
+    )
+
+    response = client.models.generate_content(
+        model=hyperparameters.model,
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    video_part,
+                    types.Part(text=user_prompt),
+                ],
+            )
+        ],
+        config=build_generation_config(hyperparameters, system_prompt=system_prompt),
+    )
+
+    if not response.text:
+        raise RuntimeError("Gemini returned an empty response.")
+
+    return response.text.strip()
+
+
+def delete_uploaded_file(client: genai.Client, uploaded_file: types.File) -> None:
+    try:
+        client.files.delete(name=uploaded_file.name)
+    except Exception:
+        pass

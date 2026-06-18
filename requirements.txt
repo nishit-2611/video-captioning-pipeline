@@ -1,0 +1,6 @@
+google-genai>=1.30.0
+streamlit>=1.42.0
+pandas>=2.2.0
+gdown>=5.2.0
+requests>=2.32.0
+python-dotenv>=1.0.0
