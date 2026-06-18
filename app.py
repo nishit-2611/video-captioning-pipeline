@@ -208,7 +208,6 @@ def render_csv_section() -> None:
                     "https://drive.google.com/file/d/FILE_ID_1/view?usp=sharing",
                     "https://drive.google.com/file/d/FILE_ID_2/view?usp=sharing",
                 ],
-                "category": ["sports", "cooking"],
             }
         )
         st.dataframe(example, use_container_width=True)
