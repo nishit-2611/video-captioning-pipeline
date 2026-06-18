@@ -134,10 +134,19 @@ def render_sidebar() -> GeminiHyperparameters:
     top_k = st.sidebar.number_input("Top K", min_value=1, max_value=100, value=40, step=1)
     max_output_tokens = st.sidebar.number_input(
         "Max output tokens",
-        min_value=256,
+        min_value=1024,
         max_value=65536,
-        value=8192,
-        step=256,
+        value=65536,
+        step=1024,
+        help="Total token budget for the response. Set high to avoid truncation.",
+    )
+    thinking_budget = st.sidebar.number_input(
+        "Thinking budget (tokens)",
+        min_value=0,
+        max_value=32768,
+        value=0,
+        step=1024,
+        help="Cap on thinking/reasoning tokens. 0 = let the model decide automatically.",
     )
     include_thoughts = st.sidebar.checkbox(
         "Include thoughts in response",
@@ -167,6 +176,7 @@ def render_sidebar() -> GeminiHyperparameters:
         top_p=float(top_p),
         top_k=int(top_k),
         max_output_tokens=int(max_output_tokens),
+        thinking_budget=int(thinking_budget) if thinking_budget else None,
         thinking_level=thinking_level,
         include_thoughts=include_thoughts,
         media_resolution=media_resolution,

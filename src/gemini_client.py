@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from typing import Any, Optional
 from google import genai
 from google.genai import types
 
+log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
 MODEL_VARIANTS = [
@@ -32,7 +34,8 @@ class GeminiHyperparameters:
     temperature: float = 1.0
     top_p: float = 0.95
     top_k: int = 40
-    max_output_tokens: int = 8192
+    max_output_tokens: int = 65536
+    thinking_budget: Optional[int] = None
     thinking_level: str = "high"
     include_thoughts: bool = False
     media_resolution: str = "media_resolution_low"
@@ -46,6 +49,7 @@ class GeminiHyperparameters:
             "top_p": self.top_p,
             "top_k": self.top_k,
             "max_output_tokens": self.max_output_tokens,
+            "thinking_budget": self.thinking_budget,
             "thinking_level": self.thinking_level,
             "include_thoughts": self.include_thoughts,
             "media_resolution": self.media_resolution,
@@ -109,15 +113,19 @@ def build_generation_config(
     hyperparameters: GeminiHyperparameters,
     system_prompt: str = "",
 ) -> types.GenerateContentConfig:
+    thinking_kwargs: dict[str, Any] = {
+        "thinking_level": hyperparameters.thinking_level,
+        "include_thoughts": hyperparameters.include_thoughts,
+    }
+    if hyperparameters.thinking_budget is not None:
+        thinking_kwargs["thinking_budget"] = hyperparameters.thinking_budget
+
     config_kwargs: dict[str, Any] = {
         "temperature": hyperparameters.temperature,
         "top_p": hyperparameters.top_p,
         "top_k": hyperparameters.top_k,
         "max_output_tokens": hyperparameters.max_output_tokens,
-        "thinking_config": types.ThinkingConfig(
-            thinking_level=hyperparameters.thinking_level,
-            include_thoughts=hyperparameters.include_thoughts,
-        ),
+        "thinking_config": types.ThinkingConfig(**thinking_kwargs),
         "media_resolution": hyperparameters.media_resolution,
     }
 
@@ -131,6 +139,22 @@ def build_generation_config(
         config_kwargs["response_mime_type"] = hyperparameters.response_mime_type
 
     return types.GenerateContentConfig(**config_kwargs)
+
+
+def _extract_text_from_response(response: types.GenerateContentResponse) -> str:
+    """Extract all non-thought text parts from the response candidates."""
+    text_parts: list[str] = []
+    if not response.candidates:
+        return ""
+    for candidate in response.candidates:
+        if not candidate.content or not candidate.content.parts:
+            continue
+        for part in candidate.content.parts:
+            if part.thought:
+                continue
+            if part.text:
+                text_parts.append(part.text)
+    return "\n".join(text_parts)
 
 
 def generate_caption(
@@ -169,10 +193,36 @@ def generate_caption(
         config=build_generation_config(hyperparameters, system_prompt=system_prompt),
     )
 
-    if not response.text:
-        raise RuntimeError("Gemini returned an empty response.")
+    finish_reason = None
+    if response.candidates:
+        finish_reason = response.candidates[0].finish_reason
 
-    return response.text.strip()
+    if finish_reason and finish_reason.name == "MAX_TOKENS":
+        log.warning(
+            "Response for %s was truncated (MAX_TOKENS). "
+            "Increase max_output_tokens or lower thinking_level.",
+            video_path.name,
+        )
+
+    caption = _extract_text_from_response(response)
+
+    if not caption:
+        detail = ""
+        if finish_reason:
+            detail = f" finish_reason={finish_reason.name}"
+        usage = response.usage_metadata
+        if usage:
+            detail += (
+                f" prompt_tokens={usage.prompt_token_count}"
+                f" output_tokens={usage.candidates_token_count}"
+                f" thoughts_tokens={getattr(usage, 'thoughts_token_count', 'N/A')}"
+            )
+        raise RuntimeError(f"Gemini returned an empty response.{detail}")
+
+    if finish_reason and finish_reason.name == "MAX_TOKENS":
+        caption += "\n\n[TRUNCATED — increase max output tokens]"
+
+    return caption.strip()
 
 
 def delete_uploaded_file(client: genai.Client, uploaded_file: types.File) -> None:
